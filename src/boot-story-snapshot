@@ -1,0 +1,820 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Summarize the current systemd boot and inspect selected units without privileges."""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+from contextlib import contextmanager
+import fcntl
+import json
+import math
+import os
+from pathlib import Path
+import re
+import selectors
+import stat
+import statistics
+import subprocess
+import tempfile
+import time
+
+
+MAX_HISTORY = 20
+HISTORY_VERSION = 1
+MAX_HISTORY_BYTES = 64 * 1024
+MAX_BOOT_DURATION_MS = 24 * 60 * 60 * 1000
+MAX_TIMESTAMP_MS = 10_000_000_000_000
+COLLECTION_DEADLINE_SECONDS = 8.0
+COMMAND_TIMEOUT_SECONDS = 5.0
+MAX_JOURNAL_BYTES = 4 * 1024 * 1024
+MAX_JOURNAL_LINES = 4096
+MAX_FAILED_UNITS = 32
+HISTORY_LOCK_TIMEOUT_SECONDS = 0.5
+UNIT_FAILED_MESSAGE_IDS = (
+    "be02cf6855d2428ba40df7e9d022f03d",  # A unit start job failed.
+    "d9b373ed55a64feb8242e02dbe79a49c",  # A unit entered failed state with a result.
+)
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(h|min|ms|us|µs|s)")
+DURATION_TERM_PATTERN = r"\d+(?:\.\d+)?\s*(?:h|min|ms|us|µs|s)"
+DURATION_EXPRESSION_PATTERN = rf"(?:{DURATION_TERM_PATTERN}\s*)+"
+STAGE_RE = re.compile(rf"({DURATION_EXPRESSION_PATTERN})\s+\(([^)]+)\)")
+TARGET_TIME_RE = re.compile(
+    rf"([A-Za-z0-9_.@-]+\.target) reached after ({DURATION_EXPRESSION_PATTERN}) in userspace"
+)
+UNIT_RE = re.compile(
+    r"([A-Za-z0-9_.@\\x:-]+\.(?:service|mount|automount|swap|socket|target|device|timer|path|slice|scope))"
+    rf"\s*(?:@({DURATION_EXPRESSION_PATTERN}))?\s*(?:\+({DURATION_EXPRESSION_PATTERN}))?"
+)
+UNIT_NAME_RE = re.compile(
+    r"^[A-Za-z0-9_.@\\x:-]+\.(?:service|mount|automount|swap|socket|target|device|timer|path|slice|scope)$"
+)
+STAGE_LABELS = {
+    "firmware": "Firmware",
+    "loader": "Bootloader",
+    "kernel": "Kernel",
+    "initrd": "Initrd",
+    "userspace": "Services",
+}
+
+
+def duration_to_ms(text: str) -> float:
+    factors = {
+        "h": 3_600_000.0,
+        "min": 60_000.0,
+        "s": 1_000.0,
+        "ms": 1.0,
+        "us": 0.001,
+        "µs": 0.001,
+    }
+    return sum(float(value) * factors[unit] for value, unit in DURATION_RE.findall(text))
+
+
+def command_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.update({"LC_ALL": "C", "SYSTEMD_COLORS": "0", "PAGER": "cat"})
+    return environment
+
+
+def remaining_timeout(deadline: float | None, maximum: float = COMMAND_TIMEOUT_SECONDS) -> float:
+    if deadline is None:
+        return maximum
+    return max(0.0, min(maximum, deadline - time.monotonic()))
+
+
+def run_command(
+    arguments: list[str],
+    timeout: float = COMMAND_TIMEOUT_SECONDS,
+    deadline: float | None = None,
+) -> tuple[str, str]:
+    effective_timeout = remaining_timeout(deadline, timeout)
+    if effective_timeout <= 0:
+        return "", "the boot collection deadline expired"
+    try:
+        completed = subprocess.run(
+            arguments,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=effective_timeout,
+            env=command_environment(),
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
+        return "", str(error)
+    if completed.returncode != 0:
+        return completed.stdout, completed.stderr.strip() or f"exit status {completed.returncode}"
+    return completed.stdout, ""
+
+
+def run_bounded_lines(
+    arguments: list[str],
+    deadline: float,
+    maximum_bytes: int = MAX_JOURNAL_BYTES,
+    maximum_lines: int = MAX_JOURNAL_LINES,
+) -> tuple[list[str], str]:
+    """Read a command incrementally with hard time, byte, and line limits."""
+    effective_timeout = remaining_timeout(deadline)
+    if effective_timeout <= 0:
+        return [], "the boot collection deadline expired"
+
+    try:
+        process = subprocess.Popen(
+            arguments,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=command_environment(),
+        )
+    except (FileNotFoundError, OSError) as error:
+        return [], str(error)
+
+    selector = selectors.DefaultSelector()
+    assert process.stdout is not None and process.stderr is not None
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    stdout_buffer = bytearray()
+    stderr_buffer = bytearray()
+    lines: list[str] = []
+    total_bytes = 0
+    error = ""
+
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                error = "the journal query exceeded the boot collection deadline"
+                break
+            for key, _mask in selector.select(min(0.2, remaining)):
+                chunk = os.read(key.fileobj.fileno(), 64 * 1024)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                if key.data == "stderr":
+                    if len(stderr_buffer) < 64 * 1024:
+                        stderr_buffer.extend(chunk[: 64 * 1024 - len(stderr_buffer)])
+                    continue
+
+                remaining_capacity = maximum_bytes - total_bytes
+                accepted = chunk[:remaining_capacity]
+                total_bytes += len(accepted)
+                stdout_buffer.extend(accepted)
+                while True:
+                    newline = stdout_buffer.find(b"\n")
+                    if newline < 0:
+                        break
+                    line = bytes(stdout_buffer[:newline])
+                    del stdout_buffer[: newline + 1]
+                    if line:
+                        lines.append(line.decode("utf-8", errors="replace"))
+                    if len(lines) > maximum_lines:
+                        error = f"the journal query exceeded the {maximum_lines}-record safety limit"
+                        break
+                if not error and len(chunk) > len(accepted):
+                    error = f"the journal query exceeded the {maximum_bytes}-byte safety limit"
+                if error:
+                    break
+            if error:
+                break
+    finally:
+        selector.close()
+
+    if error and process.poll() is None:
+        process.kill()
+    try:
+        process.wait(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+    process.stdout.close()
+    process.stderr.close()
+    if not error and stdout_buffer:
+        lines.append(stdout_buffer.decode("utf-8", errors="replace"))
+    if not error and process.returncode != 0:
+        error = stderr_buffer.decode("utf-8", errors="replace").strip() or f"exit status {process.returncode}"
+    return lines, error
+
+
+def parse_startup_time(text: str) -> dict:
+    clean = ANSI_RE.sub("", text)
+    stages_by_key: dict[str, float] = {}
+    for duration, key in STAGE_RE.findall(clean):
+        if key in STAGE_LABELS:
+            stages_by_key[key] = duration_to_ms(duration)
+
+    stages = [
+        {"key": key, "label": STAGE_LABELS[key], "durationMs": round(stages_by_key[key])}
+        for key in STAGE_LABELS
+        if key in stages_by_key
+    ]
+    total_match = re.search(r"=\s*([^\n]+?)\s*(?:\n|$)", clean)
+    if total_match:
+        total_ms = duration_to_ms(total_match.group(1))
+    else:
+        total_ms = sum(stage["durationMs"] for stage in stages)
+    target_match = TARGET_TIME_RE.search(clean)
+    return {
+        "available": bool(stages or total_ms),
+        "totalMs": round(total_ms),
+        "stages": stages,
+        "readyTarget": target_match.group(1) if target_match else "",
+        "readyUserspaceMs": round(duration_to_ms(target_match.group(2))) if target_match else 0,
+    }
+
+
+def parse_critical_chain(text: str) -> list[dict]:
+    entries: list[dict] = []
+    seen: set[str] = set()
+    for line in ANSI_RE.sub("", text).splitlines():
+        match = UNIT_RE.search(line)
+        if not match:
+            continue
+        unit, activated_text, duration_text = match.groups()
+        unit = unit.lstrip("-")
+        if unit in seen or not duration_text:
+            continue
+        duration_ms = duration_to_ms(duration_text)
+        if duration_ms <= 0:
+            continue
+        seen.add(unit)
+        entries.append({
+            "unit": unit,
+            "name": friendly_unit(unit),
+            "activatedMs": round(duration_to_ms(activated_text or "")),
+            "durationMs": round(duration_ms),
+        })
+    entries.sort(key=lambda item: item["durationMs"], reverse=True)
+    return entries
+
+
+def parse_blame(text: str, maximum_ms: float, critical_units: set[str]) -> list[dict]:
+    entries: list[dict] = []
+    seen: set[str] = set()
+    pattern = re.compile(r"^\s*((?:\d+(?:\.\d+)?(?:h|min|ms|us|µs|s)\s*)+)\s+(\S+)\s*$")
+    for line in ANSI_RE.sub("", text).splitlines():
+        match = pattern.match(line)
+        if not match:
+            continue
+        duration_text, unit = match.groups()
+        if unit in seen or not unit.endswith((".service", ".mount", ".swap")):
+            continue
+        duration_ms = duration_to_ms(duration_text)
+        if duration_ms <= 0 or duration_ms > maximum_ms:
+            continue
+        seen.add(unit)
+        entries.append({
+            "unit": unit,
+            "name": friendly_unit(unit),
+            "durationMs": round(duration_ms),
+            "onCriticalPath": unit in critical_units,
+        })
+    entries.sort(key=lambda item: item["durationMs"], reverse=True)
+    return entries
+
+
+def decode_systemd_name(value: str) -> str:
+    def replace_escape(match: re.Match[str]) -> str:
+        try:
+            return bytes.fromhex(match.group(1)).decode("latin-1")
+        except ValueError:
+            return "-"
+
+    return re.sub(r"\\x([0-9a-fA-F]{2})", replace_escape, value)
+
+
+def friendly_unit(unit: str) -> str:
+    value = decode_systemd_name(unit)
+    value = re.sub(
+        r"\.(service|mount|automount|swap|socket|target|device|timer|path|slice|scope)$",
+        "",
+        value,
+    )
+    replacements = {
+        "NetworkManager-wait-online": "Network wait-online",
+        "NetworkManager": "NetworkManager",
+        "systemd-udev-settle": "Device discovery",
+        "systemd-tmpfiles-setup": "Temporary files",
+        "systemd-update-utmp": "Login records",
+        "dbus-broker": "D-Bus",
+        "rsyslog": "System log",
+        "firewalld": "Firewall",
+        "plymouth-quit-wait": "Boot splash",
+    }
+    if value in replacements:
+        return replacements[value]
+    value = re.sub(r"@.*$", "", value)
+    value = value.replace("systemd-", "")
+    return value.replace("_", " ").replace("-", " ").strip().title() or unit
+
+
+def parse_boot_failures(text: str | list[str], ready_monotonic_us: int) -> list[str]:
+    if ready_monotonic_us <= 0:
+        return []
+
+    units: list[str] = []
+    seen: set[str] = set()
+    lines = text.splitlines() if isinstance(text, str) else text
+    for line in lines:
+        try:
+            event = json.loads(line)
+            event_monotonic_us = int(event.get("__MONOTONIC_TIMESTAMP", "0"))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        unit = str(event.get("UNIT", ""))
+        if (
+            event_monotonic_us <= 0
+            or event_monotonic_us > ready_monotonic_us
+            or unit in seen
+            or not UNIT_NAME_RE.fullmatch(unit)
+        ):
+            continue
+        seen.add(unit)
+        units.append(unit)
+    return units
+
+
+def graphical_ready_info(deadline: float | None = None) -> tuple[dict, str]:
+    target_text, target_error = run_command([
+        "systemctl",
+        "show",
+        "--property=ActiveEnterTimestamp,ActiveEnterTimestampMonotonic",
+        "--",
+        "graphical.target",
+    ], deadline=deadline)
+    if target_error:
+        return {}, target_error
+
+    target_properties = parse_show_properties(target_text)
+    try:
+        target_monotonic_us = int(target_properties.get("ActiveEnterTimestampMonotonic", "0"))
+    except ValueError:
+        target_monotonic_us = 0
+    target_realtime = target_properties.get("ActiveEnterTimestamp", "")
+    if target_monotonic_us <= 0 or not target_realtime or target_realtime == "n/a":
+        return {}, "graphical.target readiness is unavailable"
+
+    manager_text, manager_error = run_command([
+        "systemctl",
+        "show",
+        "--property=UserspaceTimestampMonotonic",
+    ], deadline=deadline)
+    if manager_error:
+        return {}, manager_error
+    manager_value = parse_show_properties(manager_text).get("UserspaceTimestampMonotonic", "0")
+    try:
+        userspace_monotonic_us = int(manager_value)
+    except ValueError:
+        userspace_monotonic_us = 0
+    if userspace_monotonic_us <= 0 or target_monotonic_us < userspace_monotonic_us:
+        return {}, "the system manager userspace timestamp is unavailable"
+
+    return {
+        "target": "graphical.target",
+        "monotonicUs": target_monotonic_us,
+        "realtime": target_realtime,
+        "userspaceMs": round((target_monotonic_us - userspace_monotonic_us) / 1000),
+    }, ""
+
+
+def collect_failed_units(deadline: float) -> tuple[list[str], dict, str]:
+    ready, ready_error = graphical_ready_info(deadline)
+    if ready_error:
+        return [], {}, ready_error
+
+    lines, journal_error = run_bounded_lines([
+        "journalctl",
+        "--boot=0",
+        f"--until={ready['realtime']}",
+        "--output=json",
+        "--output-fields=UNIT,__MONOTONIC_TIMESTAMP",
+        "--no-pager",
+        *[f"MESSAGE_ID={message_id}" for message_id in UNIT_FAILED_MESSAGE_IDS],
+    ], deadline)
+    units = parse_boot_failures(lines, int(ready["monotonicUs"]))
+    return units, ready, journal_error
+
+
+def parse_show_properties(text: str) -> dict[str, str]:
+    properties: dict[str, str] = {}
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key:
+            properties[key] = value.strip()
+    return properties
+
+
+def unit_references(text: str, limit: int = 6) -> list[dict[str, str]]:
+    references: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for unit in text.split():
+        if unit in seen or not UNIT_NAME_RE.fullmatch(unit):
+            continue
+        seen.add(unit)
+        references.append({"unit": unit, "name": friendly_unit(unit)})
+        if len(references) >= limit:
+            break
+    return references
+
+
+def inspect_unit(unit: str) -> dict:
+    if len(unit) > 256 or not UNIT_NAME_RE.fullmatch(unit):
+        return {"ok": False, "error": "That unit name is not safe to inspect"}
+
+    property_names = (
+        "Id,Description,LoadState,ActiveState,SubState,UnitFileState,FragmentPath,"
+        "Result,WantedBy,RequiredBy,TriggeredBy,Triggers,Wants,"
+        "Requires,After"
+    )
+    show_text, show_error = run_command([
+        "systemctl",
+        "show",
+        "--no-pager",
+        f"--property={property_names}",
+        "--",
+        unit,
+    ])
+    if show_error:
+        return {"ok": False, "error": show_error}
+
+    properties = parse_show_properties(show_text)
+    if properties.get("LoadState") == "not-found" or not properties.get("Id"):
+        return {"ok": False, "error": f"Unit {unit} was not found"}
+
+    return {
+        "ok": True,
+        "unit": properties.get("Id", unit),
+        "name": friendly_unit(properties.get("Id", unit)),
+        "description": properties.get("Description", ""),
+        "activeState": properties.get("ActiveState", "unknown"),
+        "subState": properties.get("SubState", "unknown"),
+        "unitFileState": properties.get("UnitFileState", ""),
+        "fragmentPath": properties.get("FragmentPath", ""),
+        "result": properties.get("Result", ""),
+        "relationships": {
+            "pulledInBy": unit_references(" ".join([
+                properties.get("RequiredBy", ""),
+                properties.get("WantedBy", ""),
+                properties.get("TriggeredBy", ""),
+            ])),
+            "bringsIn": unit_references(" ".join([
+                properties.get("Requires", ""),
+                properties.get("Wants", ""),
+                properties.get("Triggers", ""),
+            ])),
+            "orderedAfter": unit_references(properties.get("After", "")),
+        },
+    }
+
+
+def history_path() -> Path:
+    configured_root = os.environ.get("XDG_CACHE_HOME", "").strip()
+    candidate = Path(configured_root) if configured_root else Path.home() / ".cache"
+    root = candidate if candidate.is_absolute() else Path.home() / ".cache"
+    return root / "boot-story" / "history.json"
+
+
+def normalize_history_entry(entry: object) -> dict | None:
+    if not isinstance(entry, dict):
+        return None
+    boot_identifier = entry.get("bootId")
+    if not isinstance(boot_identifier, str) or not boot_identifier or len(boot_identifier) > 128:
+        return None
+
+    normalized = {"bootId": boot_identifier}
+    for key, allow_zero in (("timestampMs", True), ("totalMs", False), ("readyUserspaceMs", True)):
+        value = entry.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            return None
+        integer = round(value)
+        maximum = MAX_TIMESTAMP_MS if key == "timestampMs" else MAX_BOOT_DURATION_MS
+        if integer < 0 or (not allow_zero and integer == 0) or integer > maximum:
+            return None
+        normalized[key] = integer
+    return normalized
+
+
+def load_history(path: Path) -> tuple[list[dict], str]:
+    try:
+        if path.stat().st_size > MAX_HISTORY_BYTES:
+            return [], f"History is larger than the {MAX_HISTORY_BYTES}-byte safety limit"
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return [], ""
+    except (PermissionError, json.JSONDecodeError, OSError) as error:
+        return [], f"History could not be read: {error}"
+    if not isinstance(value, dict) or value.get("version") != HISTORY_VERSION:
+        return [], "History uses an unsupported or invalid schema version"
+    if not isinstance(value.get("boots"), list):
+        return [], "History does not contain a valid boot list"
+
+    entries = [normalized for entry in value["boots"] if (normalized := normalize_history_entry(entry))]
+    dropped = len(value["boots"]) - len(entries)
+    warning = f"Ignored {dropped} invalid history entr{'y' if dropped == 1 else 'ies'}" if dropped else ""
+    return entries[-MAX_HISTORY:], warning
+
+
+def prepare_history_directory(path: Path) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory_info = path.parent.lstat()
+    if not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.geteuid():
+        raise OSError("the Boot Story history directory is not a private user-owned directory")
+    os.chmod(path.parent, 0o700)
+
+
+@contextmanager
+def history_lock(path: Path):
+    prepare_history_directory(path)
+    flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path.with_suffix(".lock"), flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        lock_deadline = time.monotonic() + HISTORY_LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as error:
+                if time.monotonic() >= lock_deadline:
+                    raise OSError("the Boot Story history file is busy") from error
+                time.sleep(0.025)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def save_history_unlocked(path: Path, entries: list[dict]) -> None:
+    normalized = [valid for entry in entries if (valid := normalize_history_entry(entry))][-MAX_HISTORY:]
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".history-", suffix=".tmp", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            json.dump({"version": HISTORY_VERSION, "boots": normalized}, handle, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_descriptor = os.open(path.parent, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def save_history(path: Path, entries: list[dict]) -> None:
+    with history_lock(path):
+        save_history_unlocked(path, entries)
+
+
+def boot_id() -> str:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    except (FileNotFoundError, PermissionError, OSError):
+        return "unknown"
+
+
+def uptime_ms() -> int:
+    try:
+        return round(float(Path("/proc/uptime").read_text(encoding="utf-8").split()[0]) * 1000)
+    except (FileNotFoundError, PermissionError, ValueError, IndexError, OSError):
+        return 0
+
+
+def comparison_for(total_ms: int, previous_boots: list[dict]) -> dict:
+    totals = [
+        int(entry["totalMs"])
+        for entry in previous_boots
+        if isinstance(entry.get("totalMs"), (int, float)) and entry["totalMs"] > 0
+    ]
+    if not totals:
+        return {"kind": "baseline", "baselineCount": 0, "medianMs": 0, "deltaMs": 0}
+    median_ms = round(statistics.median(totals))
+    delta_ms = total_ms - median_ms
+    threshold = max(1000, round(median_ms * 0.08))
+    if delta_ms < -threshold:
+        kind = "faster"
+    elif delta_ms > threshold:
+        kind = "slower"
+    else:
+        kind = "steady"
+    return {
+        "kind": kind,
+        "baselineCount": len(totals),
+        "medianMs": median_ms,
+        "deltaMs": delta_ms,
+    }
+
+
+def update_history(system: dict, path: Path, timestamp: float) -> tuple[dict, list[dict], str]:
+    current_boot_id = boot_id()
+    with history_lock(path):
+        history, history_warning = load_history(path)
+        previous_boots = [entry for entry in history if entry.get("bootId") != current_boot_id]
+        comparison = comparison_for(system["totalMs"], previous_boots)
+        current_entry = {
+            "bootId": current_boot_id,
+            "timestampMs": max(0, round(timestamp * 1000) - uptime_ms()),
+            "totalMs": system["totalMs"],
+            "readyUserspaceMs": system["readyUserspaceMs"],
+        }
+        updated_history = previous_boots + [current_entry]
+        save_history_unlocked(path, updated_history)
+    recent = [
+        {
+            "timestampMs": int(entry.get("timestampMs", 0)),
+            "totalMs": int(entry.get("totalMs", 0)),
+            "current": entry.get("bootId") == current_boot_id,
+        }
+        for entry in updated_history[-10:]
+    ]
+    return comparison, recent, history_warning
+
+
+def record_current_boot(state_file: Path | None = None, now: float | None = None) -> dict:
+    timestamp = now if now is not None else time.time()
+    deadline = time.monotonic() + COLLECTION_DEADLINE_SECONDS
+    system_text, system_error = run_command(["systemd-analyze", "time"], deadline=deadline)
+    system = parse_startup_time(system_text)
+    if not system["available"]:
+        return {"ok": False, "error": system_error or "systemd boot timing is unavailable"}
+    ready, ready_error = graphical_ready_info(deadline)
+    if ready_error:
+        return {"ok": False, "error": ready_error}
+    system["readyTarget"] = ready["target"]
+    system["readyUserspaceMs"] = ready["userspaceMs"]
+    try:
+        update_history(system, state_file or history_path(), timestamp)
+    except (OSError, ValueError) as error:
+        return {"ok": False, "error": f"Boot history could not be recorded: {error}"}
+    return {"ok": True}
+
+
+def collect(state_file: Path | None = None, now: float | None = None) -> dict:
+    timestamp = now if now is not None else time.time()
+    deadline = time.monotonic() + COLLECTION_DEADLINE_SECONDS
+    system_text, system_error = run_command(["systemd-analyze", "time"], deadline=deadline)
+    system = parse_startup_time(system_text)
+    if not system["available"]:
+        return {"ok": False, "error": system_error or "systemd boot timing is unavailable"}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        critical_future = executor.submit(
+            run_command,
+            ["systemd-analyze", "critical-chain", "graphical.target", "--no-pager"],
+            COMMAND_TIMEOUT_SECONDS,
+            deadline,
+        )
+        blame_future = executor.submit(
+            run_command,
+            ["systemd-analyze", "blame", "--no-pager"],
+            COMMAND_TIMEOUT_SECONDS,
+            deadline,
+        )
+        user_future = executor.submit(
+            run_command,
+            ["systemd-analyze", "--user", "time"],
+            COMMAND_TIMEOUT_SECONDS,
+            deadline,
+        )
+        failures_future = executor.submit(collect_failed_units, deadline)
+        critical_text, critical_error = critical_future.result()
+        blame_text, blame_error = blame_future.result()
+        user_text, user_error = user_future.result()
+        failed_units, ready, failed_error = failures_future.result()
+
+    critical = parse_critical_chain(critical_text) if not critical_error else []
+    critical_units = {entry["unit"] for entry in critical}
+
+    userspace_ms = next(
+        (stage["durationMs"] for stage in system["stages"] if stage["key"] == "userspace"),
+        system["readyUserspaceMs"],
+    )
+    plausible_maximum = max(1000, userspace_ms * 1.15)
+    activations = parse_blame(blame_text, plausible_maximum, critical_units) if not blame_error else []
+
+    user_session = parse_startup_time(user_text) if not user_error else {
+        "available": False,
+        "totalMs": 0,
+        "stages": [],
+        "readyTarget": "",
+        "readyUserspaceMs": 0,
+    }
+    if not user_error and not user_session["available"]:
+        user_error = "the user manager timing result was unavailable"
+
+    if ready:
+        system["readyTarget"] = ready["target"]
+        system["readyUserspaceMs"] = ready["userspaceMs"]
+
+    path = state_file or history_path()
+    try:
+        comparison, recent_boots, history_error = update_history(system, path, timestamp)
+    except (OSError, ValueError) as error:
+        comparison = comparison_for(system["totalMs"], [])
+        recent_boots = []
+        history_error = f"History could not be updated: {error}"
+
+    if failed_units:
+        health = "attention"
+        qualifier = "At least " if failed_error else ""
+        summary = (
+            f"{qualifier}{len(failed_units)} system unit"
+            f"{'s' if len(failed_units) != 1 else ''} failed during startup"
+        )
+    elif failed_error:
+        health = "unknown"
+        summary = "Boot timing is available, but startup failures could not be checked"
+    elif comparison["kind"] == "faster":
+        health = "faster"
+        summary = f"{format_seconds(abs(comparison['deltaMs']))} faster than the local median"
+    elif comparison["kind"] == "slower":
+        health = "slower"
+        summary = f"{format_seconds(comparison['deltaMs'])} slower than the local median"
+    elif comparison["kind"] == "steady":
+        health = "steady"
+        summary = "Close to the local boot median"
+    else:
+        health = "baseline"
+        summary = "Local baseline recorded for the next boot"
+
+    return {
+        "ok": True,
+        "timestampMs": round(timestamp * 1000),
+        "bootAgeMs": uptime_ms(),
+        "health": health,
+        "summary": summary,
+        "system": system,
+        "userSession": user_session,
+        "criticalPath": critical[:6],
+        "criticalPathTotal": len(critical),
+        "activations": activations[:8],
+        "activationTotal": len(activations),
+        "failedUnits": [
+            {"unit": unit, "name": friendly_unit(unit)}
+            for unit in failed_units[:MAX_FAILED_UNITS]
+        ],
+        "failedUnitCount": len(failed_units),
+        "comparison": comparison,
+        "recentBoots": recent_boots,
+        "coverage": {
+            "criticalPathAvailable": not bool(critical_error),
+            "activationsAvailable": not bool(blame_error),
+            "userSessionAvailable": not bool(user_error),
+            "failedUnitsAvailable": not bool(failed_error),
+            "historyAvailable": not bool(history_error),
+            "criticalPathError": critical_error,
+            "activationsError": blame_error,
+            "userSessionError": user_error,
+            "failedUnitsError": failed_error,
+            "historyError": history_error,
+        },
+    }
+
+
+def format_seconds(milliseconds: float) -> str:
+    seconds = abs(milliseconds) / 1000.0
+    return f"{seconds:.1f}s" if seconds < 10 else f"{seconds:.0f}s"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--pretty", action="store_true", help="indent the JSON output")
+    parser.add_argument("--history-file", metavar="PATH", help="use an explicit absolute history file")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--record-only", action="store_true", help="record this boot and emit no JSON")
+    mode.add_argument("--inspect-unit", metavar="UNIT", help="inspect one system unit as JSON")
+    arguments = parser.parse_args()
+    try:
+        state_file = Path(arguments.history_file) if arguments.history_file else None
+        if state_file is not None and not state_file.is_absolute():
+            raise ValueError("the history file path must be absolute")
+        if arguments.record_only:
+            result = record_current_boot(state_file)
+        elif arguments.inspect_unit:
+            result = inspect_unit(arguments.inspect_unit)
+        else:
+            result = collect(state_file)
+    except Exception as error:  # Emit one legible application error instead of a traceback.
+        result = {"ok": False, "error": f"Boot snapshot failed: {error}"}
+    if arguments.record_only:
+        if result.get("ok"):
+            return 0
+        print(result.get("error", "Boot recording failed"), file=os.sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2 if arguments.pretty else None, separators=None if arguments.pretty else (",", ":")))
+    return 0 if result.get("ok") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

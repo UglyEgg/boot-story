@@ -1,0 +1,193 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portable:
+    name: Portable checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install check tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes ripgrep shellcheck
+      - name: Run portable checks
+        run: make check-portable
+      - name: Verify release tag version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^project(BootStory VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt)
+          gpg --batch --import keys/uglyegg-release.asc
+          git fetch origin main:refs/remotes/origin/main
+          ./scripts/verify-release-tag.sh "${GITHUB_REF_NAME}" "${version}" origin/main
+      - name: Build source archive
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: ./scripts/build-release.sh source
+      - name: Upload source archive
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: boot-story-source
+          path: dist/boot-story-*-source.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  ubuntu-deb:
+    name: Ubuntu 26.04 Debian package
+    runs-on: ubuntu-24.04
+    container: ubuntu:26.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install build and test dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --yes \
+            appstream build-essential ca-certificates cmake dpkg-dev file git ninja-build \
+            python3 qml6-module-org-kde-desktop qml6-module-org-kde-kirigami \
+            qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts \
+            qml6-module-qtquick-templates qml6-module-qtquick-window \
+            qt6-base-dev qt6-declarative-dev ripgrep shellcheck systemd-dev
+      - name: Build and test
+        run: make check-build
+      - name: Build Debian package
+        run: ./scripts/build-release.sh deb
+      - name: Inspect Debian package
+        run: |
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb
+          dpkg-deb --field dist/*.deb Depends
+      - name: Upload Debian package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: boot-story-deb
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+  fedora-rpm:
+    name: Fedora 44 RPM package
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install build and test dependencies
+        run: |
+          dnf install --assumeyes --setopt=install_weak_deps=False \
+            ShellCheck appstream cmake file gcc-c++ git kf6-kirigami \
+            kf6-qqc2-desktop-style ninja-build python3 qt6-qtbase-devel \
+            qt6-qtdeclarative-devel qt6-qttools-devel ripgrep rpm-build systemd systemd-devel
+      - name: Build and test
+        run: make check-build
+      - name: Build RPM and portable packages
+        run: |
+          ./scripts/build-release.sh rpm
+          ./scripts/build-release.sh tgz
+      - name: Inspect RPM package
+        run: |
+          rpm --query --package --info dist/*.rpm
+          rpm --query --package --list dist/*.rpm
+          rpm --query --package --requires dist/*.rpm
+      - name: Upload RPM package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: boot-story-rpm
+          path: |
+            dist/*.rpm
+            dist/boot-story-*-Linux-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  ubuntu-package-smoke:
+    name: Clean Ubuntu package smoke test
+    needs: ubuntu-deb
+    runs-on: ubuntu-24.04
+    container: ubuntu:26.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out smoke test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download Debian package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: boot-story-deb
+          path: packages
+      - name: Install and launch package
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --yes \
+            ./packages/*.deb xauth xvfb
+          xvfb-run -a boot-story --version
+          ./tests/package-smoke.sh /usr/bin/boot-story
+
+  fedora-package-smoke:
+    name: Clean Fedora package smoke test
+    needs: fedora-rpm
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    timeout-minutes: 10
+    steps:
+      - name: Check out smoke test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download RPM package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: boot-story-rpm
+          path: packages
+      - name: Install and launch package
+        run: |
+          dnf install --assumeyes --setopt=install_weak_deps=False \
+            packages/*.rpm xorg-x11-server-Xvfb xorg-x11-xauth
+          xvfb-run -a boot-story --version
+          ./tests/package-smoke.sh /usr/bin/boot-story
+
+  release:
+    name: Prepare signed-release draft
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [portable, ubuntu-deb, fedora-rpm, ubuntu-package-smoke, fedora-package-smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Download release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: boot-story-*
+          path: release-assets
+          merge-multiple: true
+      - name: Create checksum manifest
+        run: |
+          version=$(sed -n 's/^project(BootStory VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt)
+          ./scripts/release-manifest.sh write-complete release-assets "$version"
+          ./scripts/release-manifest.sh verify-complete release-assets "$version"
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" release-assets/* \
+            --draft \
+            --generate-notes \
+            --title "Boot Story ${GITHUB_REF_NAME#v}" \
+            --verify-tag

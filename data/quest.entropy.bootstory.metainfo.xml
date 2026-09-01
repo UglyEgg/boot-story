@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>quest.entropy.bootstory</id>
+  <name>Boot Story</name>
+  <summary>See how Linux and Plasma assembled the current boot</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="quest.entropy">
+    <name>uglyegg</name>
+  </developer>
+  <description>
+    <p>Boot Story turns systemd boot timing into a proportional timeline, the actual graphical critical path, and a clearly separated list of long parallel activations.</p>
+    <p>Select a visible unit to learn why it ran, what it depends on, and the local systemd evidence behind the explanation without starting from a wall of services.</p>
+    <p>It learns a private local median across boots without a resident service or network access.</p>
+  </description>
+  <launchable type="desktop-id">quest.entropy.bootstory.desktop</launchable>
+  <url type="homepage">https://github.com/uglyegg/boot-story</url>
+  <url type="bugtracker">https://github.com/uglyegg/boot-story/issues</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-09-01"/>
+  </releases>
+</component>

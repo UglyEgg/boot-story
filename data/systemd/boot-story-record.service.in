@@ -1,0 +1,12 @@
+[Unit]
+Description=Record the current boot for Boot Story
+Documentation=https://github.com/UglyEgg/boot-story
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=@CMAKE_INSTALL_FULL_LIBEXECDIR@/boot-story/boot-story-snapshot --record-only --history-file %C/boot-story/history.json
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX

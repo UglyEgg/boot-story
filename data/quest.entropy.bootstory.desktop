@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Boot Story
+Comment=See how Linux and Plasma assembled the current boot
+Exec=boot-story
+Icon=quest.entropy.bootstory
+Terminal=false
+Categories=Qt;KDE;System;Monitor;
+Keywords=boot;startup;systemd;performance;critical path;
+StartupNotify=true
+StartupWMClass=quest.entropy.bootstory
+X-KDE-SingleMainWindow=true
