@@ -52,13 +52,18 @@ jobs:
     container: ubuntu:26.04
     timeout-minutes: 20
     steps:
+      - name: Install checkout prerequisite
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --yes \
+            ca-certificates git
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build and test dependencies
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --yes \
-            appstream build-essential ca-certificates cmake dpkg-dev file git ninja-build \
+            appstream build-essential cmake dpkg-dev file ninja-build \
             python3 qml6-module-org-kde-desktop qml6-module-org-kde-kirigami \
             qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts \
             qml6-module-qtquick-templates qml6-module-qtquick-window \
@@ -86,12 +91,14 @@ jobs:
     container: fedora:44
     timeout-minutes: 20
     steps:
+      - name: Install checkout prerequisite
+        run: dnf install --assumeyes --setopt=install_weak_deps=False git
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build and test dependencies
         run: |
           dnf install --assumeyes --setopt=install_weak_deps=False \
-            ShellCheck appstream cmake file gcc-c++ git kf6-kirigami \
+            ShellCheck appstream cmake file gcc-c++ kf6-kirigami \
             kf6-qqc2-desktop-style ninja-build python3 qt6-qtbase-devel \
             qt6-qtdeclarative-devel qt6-qttools-devel ripgrep rpm-build systemd systemd-devel
       - name: Build and test
