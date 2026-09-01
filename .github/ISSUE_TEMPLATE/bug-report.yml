@@ -1,0 +1,118 @@
+name: Bug report
+description: Report a reproducible problem with Boot Story
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Boot Story. Please report security vulnerabilities through the Security Policy link in the issue chooser instead of opening a public issue.
+
+        Diagnostic output can contain usernames, hostnames, unit arguments, and other private details. Please remove anything sensitive before submitting it.
+
+  - type: input
+    id: version
+    attributes:
+      label: Boot Story version
+      description: The version shown by your package manager or in the application.
+      placeholder: 0.1.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation method
+      options:
+        - Fedora RPM
+        - Ubuntu or Kubuntu Debian package
+        - Portable Linux archive
+        - Built from source
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: distribution
+    attributes:
+      label: Linux distribution
+      description: Include the distribution name and version.
+      placeholder: Fedora 44 or Kubuntu 26.04 LTS
+    validations:
+      required: true
+
+  - type: input
+    id: plasma
+    attributes:
+      label: KDE Plasma version
+      placeholder: 6.x
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Launch or refresh
+        - Boot timeline or gauges
+        - Critical path or long activations
+        - Unit deep dive
+        - History collection or settings
+        - Theme, layout, or accessibility
+        - Packaging or installation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the visible problem and whether Boot Story showed an error.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: List the shortest sequence that reliably causes the problem.
+      placeholder: |
+        1. Open Boot Story
+        2. Select ...
+        3. See ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should Boot Story have shown or done instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Relevant diagnostic output
+      description: If relevant, include sanitized output from `systemd-analyze time` or the exact error shown by Boot Story. Do not post an entire journal.
+      render: shell
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Add a screenshot, theme name, unusual systemd setup, or anything else that helps explain the problem.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues for this problem.
+          required: true
+        - label: I removed private or sensitive information from the report.
+          required: true
