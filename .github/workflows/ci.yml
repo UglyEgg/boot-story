@@ -59,6 +59,8 @@ jobs:
             ca-certificates git
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Trust checked-out workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Install build and test dependencies
         run: |
           apt-get update
@@ -95,6 +97,8 @@ jobs:
         run: dnf install --assumeyes --setopt=install_weak_deps=False git
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Trust checked-out workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Install build and test dependencies
         run: |
           dnf install --assumeyes --setopt=install_weak_deps=False \
