@@ -1,6 +1,7 @@
 # Boot Story
 
 [![CI](https://github.com/uglyegg/boot-story/actions/workflows/ci.yml/badge.svg)](https://github.com/uglyegg/boot-story/actions/workflows/ci.yml)
+[![Get Boot Story on the KDE Store](https://img.shields.io/badge/KDE%20Store-Get%20Boot%20Story-1d99f3?logo=kde&logoColor=white)](https://store.kde.org/p/2370130)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSES/GPL-3.0-or-later.txt)
 
 Boot Story is a native Qt 6 and Kirigami application that turns a systemd boot
