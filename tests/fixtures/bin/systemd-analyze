@@ -1,0 +1,31 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+set -eu
+
+case " $* " in
+    *" --user time "*)
+        printf '%s\n' \
+            'Startup finished in 800ms (userspace) = 800ms' \
+            'default.target reached after 700ms in userspace.'
+        ;;
+    *" critical-chain graphical.target --no-pager "*)
+        printf '%s\n' \
+            'graphical.target @1.500s' \
+            '└─fixture-critical.service @500ms +1.000s'
+        ;;
+    *" blame --no-pager "*)
+        printf '%s\n' \
+            '1.000s fixture-critical.service' \
+            '250ms fixture-parallel.service'
+        ;;
+    *" time "*)
+        printf '%s\n' \
+            'Startup finished in 1.000s (kernel) + 2.000s (userspace) = 3.000s' \
+            'graphical.target reached after 1.500s in userspace.'
+        ;;
+    *)
+        printf 'Unexpected systemd-analyze arguments: %s\n' "$*" >&2
+        exit 2
+        ;;
+esac

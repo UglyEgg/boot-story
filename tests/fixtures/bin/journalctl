@@ -1,0 +1,7 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+set -eu
+
+printf '%s\n' \
+    '{"UNIT":"fixture-failure.service","__MONOTONIC_TIMESTAMP":"2000000"}'

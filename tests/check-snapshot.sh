@@ -7,8 +7,10 @@ project_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 temporary_dir=$(mktemp -d)
 trap 'rm -rf -- "$temporary_dir"' EXIT HUP INT TERM
 output="$temporary_dir/snapshot.json"
+fixture_path="$project_root/tests/fixtures/bin:$PATH"
 
-XDG_CACHE_HOME="$temporary_dir/cache" "$project_root/src/boot-story-snapshot" > "$output"
+PATH="$fixture_path" XDG_CACHE_HOME="$temporary_dir/cache" \
+    "$project_root/src/boot-story-snapshot" > "$output"
 
 python3 - "$output" <<'PY'
 import json
@@ -19,25 +21,34 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 
 assert snapshot["ok"] is True
 assert snapshot["system"]["available"] is True
-assert snapshot["system"]["totalMs"] > 0
+assert snapshot["system"]["totalMs"] == 3_000
+assert snapshot["system"]["readyUserspaceMs"] == 1_500
 assert isinstance(snapshot["system"]["stages"], list)
-assert isinstance(snapshot["criticalPath"], list)
-assert isinstance(snapshot["activations"], list)
-assert snapshot["health"] in {"attention", "faster", "slower", "steady", "baseline", "unknown"}
-assert isinstance(snapshot["failedUnitCount"], int)
-assert isinstance(snapshot["coverage"]["failedUnitsAvailable"], bool)
+assert snapshot["criticalPath"][0]["unit"] == "fixture-critical.service"
+assert snapshot["criticalPath"][0]["durationMs"] == 1_000
+assert [item["unit"] for item in snapshot["activations"]] == [
+    "fixture-critical.service",
+    "fixture-parallel.service",
+]
+assert snapshot["health"] == "attention"
+assert snapshot["failedUnitCount"] == 1
+assert snapshot["failedUnits"][0]["unit"] == "fixture-failure.service"
+assert snapshot["coverage"]["failedUnitsAvailable"] is True
+assert snapshot["coverage"]["userSessionAvailable"] is True
 PY
 
 test -f "$temporary_dir/cache/boot-story/history.json"
 test "$(stat -c '%a' "$temporary_dir/cache/boot-story/history.json")" = "600"
 
 record_output="$temporary_dir/record-output"
-XDG_CACHE_HOME="$temporary_dir/record-cache" "$project_root/src/boot-story-snapshot" --record-only > "$record_output"
+PATH="$fixture_path" XDG_CACHE_HOME="$temporary_dir/record-cache" \
+    "$project_root/src/boot-story-snapshot" --record-only > "$record_output"
 test ! -s "$record_output"
 test -f "$temporary_dir/record-cache/boot-story/history.json"
 
 unit_output="$temporary_dir/unit.json"
-"$project_root/src/boot-story-snapshot" --inspect-unit systemd-journald.service > "$unit_output"
+PATH="$fixture_path" "$project_root/src/boot-story-snapshot" \
+    --inspect-unit systemd-journald.service > "$unit_output"
 
 python3 - "$unit_output" <<'PY'
 import json
@@ -48,7 +59,9 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 
 assert details["ok"] is True
 assert details["unit"] == "systemd-journald.service"
-assert isinstance(details["relationships"]["pulledInBy"], list)
-assert isinstance(details["relationships"]["bringsIn"], list)
-assert isinstance(details["result"], str)
+assert details["description"] == "Journal Service"
+assert details["activeState"] == "active"
+assert details["result"] == "success"
+assert details["relationships"]["pulledInBy"]
+assert details["relationships"]["bringsIn"]
 PY

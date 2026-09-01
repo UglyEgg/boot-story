@@ -1,0 +1,37 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+set -eu
+
+case " $* " in
+    *" --no-pager "*" -- systemd-journald.service "*)
+        printf '%s\n' \
+            'Id=systemd-journald.service' \
+            'Description=Journal Service' \
+            'LoadState=loaded' \
+            'ActiveState=active' \
+            'SubState=running' \
+            'UnitFileState=static' \
+            'FragmentPath=/usr/lib/systemd/system/systemd-journald.service' \
+            'Result=success' \
+            'WantedBy=multi-user.target' \
+            'RequiredBy=' \
+            'TriggeredBy=systemd-journald.socket' \
+            'Triggers=' \
+            'Wants=' \
+            'Requires=systemd-journald.socket system.slice' \
+            'After=systemd-journald.socket system.slice'
+        ;;
+    *" -- graphical.target "*)
+        printf '%s\n' \
+            'ActiveEnterTimestamp=Mon 2026-09-01 12:00:00 CDT' \
+            'ActiveEnterTimestampMonotonic=2500000'
+        ;;
+    *" --property=UserspaceTimestampMonotonic "*)
+        printf '%s\n' 'UserspaceTimestampMonotonic=1000000'
+        ;;
+    *)
+        printf 'Unexpected systemctl arguments: %s\n' "$*" >&2
+        exit 2
+        ;;
+esac

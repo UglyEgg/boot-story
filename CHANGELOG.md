@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.1.0 — Unreleased
+## 0.1.1 — 2026-09-01
+
+- Make release-gate snapshot checks deterministic with a complete fixture boot.
 
 - Initial native Qt 6 and Kirigami application.
 - Add a proportional five-stage system boot timeline.
