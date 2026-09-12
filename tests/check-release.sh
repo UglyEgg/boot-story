@@ -13,12 +13,13 @@ printf 'source\n' > "$assets/boot-story-0.1.0-source.tar.gz"
 printf 'portable\n' > "$assets/boot-story-0.1.0-Linux-x86_64.tar.gz"
 printf 'debian\n' > "$assets/boot-story_0.1.0-1_amd64.deb"
 printf 'rpm\n' > "$assets/boot-story-0.1.0-1.x86_64.rpm"
+printf 'appimage\n' > "$assets/boot-story-0.1.0-x86_64.AppImage"
 
 "$project_root/scripts/release-manifest.sh" write "$assets" 0.1.0
 "$project_root/scripts/release-manifest.sh" verify "$assets" 0.1.0 >/dev/null
 "$project_root/scripts/release-manifest.sh" write-complete "$assets" 0.1.0
 "$project_root/scripts/release-manifest.sh" verify-complete "$assets" 0.1.0 >/dev/null
-test "$(wc -l < "$assets/SHA256SUMS")" -eq 4
+test "$(wc -l < "$assets/SHA256SUMS")" -eq 5
 rg -Fq 'boot-story_0.1.0-1_amd64.deb' "$assets/SHA256SUMS"
 
 mv -- "$assets/boot-story-0.1.0-1.x86_64.rpm" "$temporary_dir/boot-story.rpm"

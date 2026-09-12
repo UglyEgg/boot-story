@@ -27,6 +27,7 @@ body:
       options:
         - Fedora RPM
         - Ubuntu or Kubuntu Debian package
+        - AppImage
         - Portable Linux archive
         - Built from source
         - Other

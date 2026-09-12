@@ -1,0 +1,12 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+set -eu
+
+# Keep the host's Xauthority libraries paired with its X server. Bundling these
+# tiny protocol libraries breaks X11 authentication on otherwise compatible
+# distributions.
+exec "$BOOT_STORY_QT_PLUGIN" \
+    --exclude-library 'libXau.so*' \
+    --exclude-library 'libXdmcp.so*' \
+    "$@"

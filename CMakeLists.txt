@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(BootStory VERSION 0.1.1 LANGUAGES CXX)
+project(BootStory VERSION 0.1.2 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CTest)
@@ -49,23 +49,26 @@ target_link_libraries(boot-story PRIVATE
     Qt6::QuickControls2
 )
 
-if(PkgConfig_FOUND)
-    pkg_get_variable(BOOT_STORY_NATIVE_SYSTEMD_USER_UNIT_DIR systemd systemduserunitdir)
+option(BOOT_STORY_INSTALL_SYSTEMD_UNITS "Install native systemd user units" ON)
+if(BOOT_STORY_INSTALL_SYSTEMD_UNITS)
+    if(PkgConfig_FOUND)
+        pkg_get_variable(BOOT_STORY_NATIVE_SYSTEMD_USER_UNIT_DIR systemd systemduserunitdir)
+    endif()
+    if(NOT BOOT_STORY_NATIVE_SYSTEMD_USER_UNIT_DIR)
+        set(BOOT_STORY_NATIVE_SYSTEMD_USER_UNIT_DIR "${CMAKE_INSTALL_PREFIX}/lib/systemd/user")
+    endif()
+    if(NOT DEFINED BOOT_STORY_SYSTEMD_USER_UNIT_DIR
+       OR BOOT_STORY_SYSTEMD_USER_UNIT_DIR STREQUAL "${CMAKE_INSTALL_DATADIR}/systemd/user"
+       OR BOOT_STORY_SYSTEMD_USER_UNIT_DIR STREQUAL "${CMAKE_INSTALL_LIBDIR}/systemd/user")
+        set(BOOT_STORY_SYSTEMD_USER_UNIT_DIR "${BOOT_STORY_NATIVE_SYSTEMD_USER_UNIT_DIR}"
+            CACHE PATH "Installation directory for systemd user units" FORCE)
+    endif()
+    configure_file(
+        data/systemd/boot-story-record.service.in
+        "${CMAKE_CURRENT_BINARY_DIR}/boot-story-record.service"
+        @ONLY
+    )
 endif()
-if(NOT BOOT_STORY_NATIVE_SYSTEMD_USER_UNIT_DIR)
-    set(BOOT_STORY_NATIVE_SYSTEMD_USER_UNIT_DIR "${CMAKE_INSTALL_PREFIX}/lib/systemd/user")
-endif()
-if(NOT DEFINED BOOT_STORY_SYSTEMD_USER_UNIT_DIR
-   OR BOOT_STORY_SYSTEMD_USER_UNIT_DIR STREQUAL "${CMAKE_INSTALL_DATADIR}/systemd/user"
-   OR BOOT_STORY_SYSTEMD_USER_UNIT_DIR STREQUAL "${CMAKE_INSTALL_LIBDIR}/systemd/user")
-    set(BOOT_STORY_SYSTEMD_USER_UNIT_DIR "${BOOT_STORY_NATIVE_SYSTEMD_USER_UNIT_DIR}"
-        CACHE PATH "Installation directory for systemd user units" FORCE)
-endif()
-configure_file(
-    data/systemd/boot-story-record.service.in
-    "${CMAKE_CURRENT_BINARY_DIR}/boot-story-record.service"
-    @ONLY
-)
 
 install(TARGETS boot-story RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(PROGRAMS src/boot-story-snapshot DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/boot-story")
@@ -73,9 +76,11 @@ install(FILES data/quest.entropy.bootstory.desktop DESTINATION "${CMAKE_INSTALL_
 install(FILES data/quest.entropy.bootstory.metainfo.xml DESTINATION "${CMAKE_INSTALL_DATADIR}/metainfo")
 install(FILES data/icons/hicolor/scalable/apps/quest.entropy.bootstory.svg
     DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps")
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/boot-story-record.service"
-    data/systemd/boot-story-record.timer
-    DESTINATION "${BOOT_STORY_SYSTEMD_USER_UNIT_DIR}")
+if(BOOT_STORY_INSTALL_SYSTEMD_UNITS)
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/boot-story-record.service"
+        data/systemd/boot-story-record.timer
+        DESTINATION "${BOOT_STORY_SYSTEMD_USER_UNIT_DIR}")
+endif()
 
 if(BUILD_TESTING)
     find_package(Qt6 6.6 REQUIRED COMPONENTS Test QmlTools)
