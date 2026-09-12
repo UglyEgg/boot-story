@@ -5,9 +5,9 @@ set -eu
 
 requested_format=${1:-tgz}
 case "$requested_format" in
-    all|deb|rpm|source|tgz) ;;
+    all|appimage|deb|rpm|source|tgz) ;;
     *)
-        printf 'Usage: %s [all|deb|rpm|source|tgz]\n' "$0" >&2
+        printf 'Usage: %s [all|appimage|deb|rpm|source|tgz]\n' "$0" >&2
         exit 2
         ;;
 esac
@@ -26,11 +26,14 @@ mkdir -p -- "$package_dir"
 
 generators=
 include_source=false
+include_appimage=false
 case "$requested_format" in
     all)
         generators='TGZ DEB RPM'
         include_source=true
+        include_appimage=true
         ;;
+    appimage) include_appimage=true ;;
     deb) generators='DEB' ;;
     rpm) generators='RPM' ;;
     source) include_source=true ;;
@@ -70,6 +73,10 @@ for generator in $generators; do
         cpack -G "$generator" --config "$build_dir/CPackConfig.cmake" -B "$package_dir" >/dev/null
 done
 
+if "$include_appimage"; then
+    "$project_root/scripts/build-appimage.sh" "$package_dir"
+fi
+
 if "$include_source"; then
     if test -n "$(git -C "$project_root" status --porcelain --untracked-files=normal)"; then
         printf 'Refusing to create a source release from a dirty worktree.\n' >&2
@@ -91,19 +98,21 @@ mkdir -p -- "$dist_dir"
 # it must never mix versions. Preserve only current-version artifacts, then
 # replace the format requested by this invocation.
 find "$dist_dir" -maxdepth 1 -type f \
-    \( -name 'boot-story-*.tar.gz' -o -name 'boot-story_*.deb' -o -name 'boot-story-*.rpm' \) \
+    \( -name 'boot-story-*.tar.gz' -o -name 'boot-story_*.deb' -o -name 'boot-story-*.rpm' -o -name 'boot-story-*.AppImage' \) \
     ! -name "boot-story-$version-source.tar.gz" \
     ! -name "boot-story-$version-Linux-*.tar.gz" \
     ! -name "boot-story_${version}-*.deb" \
     ! -name "boot-story-${version}-*.rpm" \
+    ! -name "boot-story-${version}-*.AppImage" \
     -delete
 case "$requested_format" in
     all)
         find "$dist_dir" -maxdepth 1 -type f \
-            \( -name 'boot-story-*.tar.gz' -o -name 'boot-story_*.deb' -o -name 'boot-story-*.rpm' \) \
+            \( -name 'boot-story-*.tar.gz' -o -name 'boot-story_*.deb' -o -name 'boot-story-*.rpm' -o -name 'boot-story-*.AppImage' \) \
             -delete
         ;;
     deb) find "$dist_dir" -maxdepth 1 -type f -name 'boot-story_*.deb' -delete ;;
+    appimage) find "$dist_dir" -maxdepth 1 -type f -name 'boot-story-*.AppImage' -delete ;;
     rpm) find "$dist_dir" -maxdepth 1 -type f -name 'boot-story-*.rpm' -delete ;;
     source) find "$dist_dir" -maxdepth 1 -type f -name 'boot-story-*-source.tar.gz' -delete ;;
     tgz)

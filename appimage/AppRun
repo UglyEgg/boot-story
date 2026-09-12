@@ -1,0 +1,60 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+set -u
+
+case ${APPDIR:-} in
+    /*) appdir=$APPDIR ;;
+    *) appdir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd) ;;
+esac
+
+# AppImages have no package installation phase, so place the tiny recorder and
+# its disabled-by-default user units at stable per-user paths. This preserves
+# the in-app history switch even when the AppImage's temporary mount disappears.
+install_portable_file()
+{
+    source_file=$1
+    destination_file=$2
+    file_mode=$3
+    destination_dir=${destination_file%/*}
+
+    mkdir -p -- "$destination_dir" || return 1
+    if test -f "$destination_file" && cmp -s -- "$source_file" "$destination_file"; then
+        return 0
+    fi
+
+    temporary_file=$(mktemp --tmpdir="$destination_dir" .boot-story.XXXXXX) || return 1
+    if ! cp -- "$source_file" "$temporary_file" \
+            || ! chmod "$file_mode" "$temporary_file" \
+            || ! mv -fT -- "$temporary_file" "$destination_file"; then
+        rm -f -- "$temporary_file"
+        return 1
+    fi
+    portable_files_changed=true
+}
+
+portable_files_changed=false
+if test -n "${HOME:-}" && test "${HOME#/}" != "$HOME"; then
+    config_home=${XDG_CONFIG_HOME:-"$HOME/.config"}
+    case "$config_home" in
+        /*) ;;
+        *) config_home="$HOME/.config" ;;
+    esac
+
+    umask 077
+    if ! install_portable_file \
+            "$appdir/usr/libexec/boot-story/boot-story-snapshot" \
+            "$HOME/.local/libexec/boot-story/boot-story-snapshot" 0700 \
+        || ! install_portable_file \
+            "$appdir/usr/share/boot-story/portable/boot-story-record.service" \
+            "$config_home/systemd/user/boot-story-record.service" 0600 \
+        || ! install_portable_file \
+            "$appdir/usr/share/boot-story/portable/boot-story-record.timer" \
+            "$config_home/systemd/user/boot-story-record.timer" 0600; then
+        printf '%s\n' 'Boot Story could not prepare automatic history collection for this user.' >&2
+    elif test "$portable_files_changed" = true && command -v systemctl >/dev/null 2>&1; then
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+    fi
+fi
+
+exec "$appdir/usr/bin/boot-story" "$@"

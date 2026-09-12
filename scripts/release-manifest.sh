@@ -34,6 +34,7 @@ source_count=0
 portable_count=0
 deb_count=0
 rpm_count=0
+appimage_count=0
 
 for asset_path in "$asset_dir"/*; do
     test -e "$asset_path" || continue
@@ -60,6 +61,10 @@ for asset_path in "$asset_dir"/*; do
             rpm_count=$((rpm_count + 1))
             printf '%s\n' "$asset_name" >> "$asset_names"
             ;;
+        boot-story-"$version"-*-x86_64.AppImage|boot-story-"$version"-x86_64.AppImage)
+            appimage_count=$((appimage_count + 1))
+            printf '%s\n' "$asset_name" >> "$asset_names"
+            ;;
         SHA256SUMS|SHA256SUMS.asc) ;;
         *)
             printf 'Unexpected or mixed-version release asset: %s\n' "$asset_name" >&2
@@ -77,10 +82,11 @@ if test "$require_complete" = true &&
         ! { test "$source_count" -eq 1 &&
             test "$portable_count" -eq 1 &&
             test "$deb_count" -eq 1 &&
-            test "$rpm_count" -eq 1; }; then
-    printf '%s\n' \
-        'A complete release requires exactly one source archive, portable archive, DEB, and RPM.' \
-        "Found: source=$source_count portable=$portable_count deb=$deb_count rpm=$rpm_count" >&2
+            test "$rpm_count" -eq 1 &&
+            test "$appimage_count" -eq 1; }; then
+        printf '%s\n' \
+        'A complete release requires exactly one source archive, portable archive, DEB, RPM, and AppImage.' \
+        "Found: source=$source_count portable=$portable_count deb=$deb_count rpm=$rpm_count appimage=$appimage_count" >&2
     exit 1
 fi
 

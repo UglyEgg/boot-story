@@ -33,6 +33,7 @@ activations merely happened alongside it.
 
 Boot Story currently targets:
 
+- Current x86-64 Linux distributions (`.AppImage`)
 - Fedora 44 (`.rpm`)
 - Ubuntu or Kubuntu 26.04 LTS (`.deb`)
 
@@ -45,6 +46,18 @@ Install a downloaded package through the normal package manager:
 sudo dnf install ./boot-story-*.rpm
 sudo apt install ./boot-story_*.deb
 ```
+
+Or download the AppImage, make it executable, and open it directly:
+
+```sh
+chmod +x boot-story-*-x86_64.AppImage
+./boot-story-*-x86_64.AppImage
+```
+
+The AppImage bundles Qt, Kirigami, and the KDE controls style. It still uses the
+host's systemd tools because the story is about the host's boot. On first launch
+it places the small history recorder and disabled-by-default user units under
+your home directory so the Settings switch works without a manual install.
 
 ### Build and install from source
 
@@ -157,12 +170,13 @@ Build individual package formats with:
 ```sh
 make package-rpm
 make package-deb
+make package-appimage
 make package
 ```
 
-Artifacts and their `SHA256SUMS` manifest are written to `dist/`. Fedora and
-Ubuntu packages are built and clean-install tested in their native CI
-environments. Tagged releases use an allow-listed signed tag, an offline-signed
+Artifacts and their `SHA256SUMS` manifest are written to `dist/`. Fedora,
+Ubuntu, and AppImage packages are built and clean-install or standalone tested
+in CI. Tagged releases use an allow-listed signed tag, an offline-signed
 manifest, and a guarded draft-publication workflow.
 
 Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before

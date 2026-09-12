@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.2 — 2026-09-12
+
+- Add a portable x86-64 AppImage for distribution through KDE Discover.
+- Preserve the in-app automatic-history switch by installing its tiny recorder
+  and disabled-by-default user units at stable per-user paths on AppImage launch.
+- Pin and verify the AppImage packaging tools used by CI.
+- Add clean AppImage extraction, runtime, KDE style, Kirigami, and portable-unit
+  smoke checks to the release gate.
+
 ## 0.1.1 — 2026-09-01
 
 - Make release-gate snapshot checks deterministic with a complete fixture boot.

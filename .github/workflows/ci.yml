@@ -65,7 +65,7 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --yes \
-            appstream build-essential cmake dpkg-dev file ninja-build \
+            appstream build-essential cmake curl dpkg-dev file ninja-build \
             python3 qml6-module-org-kde-desktop qml6-module-org-kde-kirigami \
             qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts \
             qml6-module-qtquick-templates qml6-module-qtquick-window \
@@ -84,6 +84,42 @@ jobs:
         with:
           name: boot-story-deb
           path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+  debian-appimage:
+    name: Debian 13 AppImage
+    runs-on: ubuntu-24.04
+    container: debian:13-slim
+    timeout-minutes: 20
+    steps:
+      - name: Install checkout prerequisite
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --yes \
+            ca-certificates git
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Trust checked-out workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --yes \
+            build-essential cmake curl file ninja-build \
+            qml6-module-org-kde-desktop qml6-module-org-kde-kirigami \
+            qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts \
+            qml6-module-qtquick-templates qml6-module-qtquick-window \
+            qt6-base-dev qt6-declarative-dev qt6-wayland
+      - name: Build and inspect AppImage
+        run: |
+          ./scripts/build-release.sh appimage
+          file dist/*.AppImage
+      - name: Upload AppImage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: boot-story-appimage
+          path: dist/*.AppImage
           if-no-files-found: error
           retention-days: 14
 
@@ -169,10 +205,47 @@ jobs:
           xvfb-run -a boot-story --version
           ./tests/package-smoke.sh /usr/bin/boot-story
 
+  ubuntu-appimage-smoke:
+    name: Clean AppImage smoke test
+    needs: debian-appimage
+    runs-on: ubuntu-24.04
+    container: ubuntu:26.04
+    timeout-minutes: 10
+    steps:
+      - name: Install smoke-test prerequisites
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --yes \
+            ca-certificates libegl1 libfontconfig1 libfreetype6 libglx0 \
+            libharfbuzz0b libice6 libopengl0 libsm6 libx11-6 libx11-xcb1 \
+            libxcb1 python3 ripgrep xauth xvfb
+      - name: Check out smoke test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download AppImage
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: boot-story-appimage
+          path: packages
+      - name: Launch and inspect AppImage
+        run: |
+          chmod 0755 packages/*.AppImage
+          ./tests/appimage-smoke.sh packages/*.AppImage
+          tmp=$(mktemp -d)
+          HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/config" \
+            APPIMAGE_EXTRACT_AND_RUN=1 QT_QPA_PLATFORM=xcb \
+            xvfb-run -a packages/*.AppImage --version
+          set +e
+          HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/config" XDG_CACHE_HOME="$tmp/cache" \
+            APPIMAGE_EXTRACT_AND_RUN=1 QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=software \
+            timeout 5s xvfb-run -a packages/*.AppImage
+          rc=$?
+          set -e
+          test "$rc" -eq 124
+
   release:
     name: Prepare signed-release draft
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [portable, ubuntu-deb, fedora-rpm, ubuntu-package-smoke, fedora-package-smoke]
+    needs: [portable, ubuntu-deb, debian-appimage, fedora-rpm, ubuntu-package-smoke, fedora-package-smoke, ubuntu-appimage-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

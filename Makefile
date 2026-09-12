@@ -4,7 +4,7 @@ BUILD_DIR ?= build
 QML_FILES := $(shell find src/qml -type f -name '*.qml' -print)
 SHELL_FILES := $(shell find scripts tests -type f -name '*.sh' -print)
 
-.PHONY: all configure check check-build check-common check-portable format install package package-deb package-rpm release sign-release
+.PHONY: all configure check check-build check-common check-portable format install package package-appimage package-deb package-rpm release sign-release
 
 all: configure
 	cmake --build $(BUILD_DIR)
@@ -39,6 +39,9 @@ package-deb: check
 
 package-rpm: check
 	./scripts/build-release.sh rpm
+
+package-appimage: check
+	./scripts/build-release.sh appimage
 
 release: check
 	./scripts/build-release.sh all
